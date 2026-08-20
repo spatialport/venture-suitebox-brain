@@ -1,0 +1,32 @@
+name: tasks-sync
+# Rigenera 50-tasks/tasks.md dalla dashboard NXTO ogni ora (Fase 3.1).
+# La dashboard resta l'unica fonte di verita': questo file e' una vista.
+# Secrets richiesti nel repo: NXTO_API, NXTO_KEY (impostati da install-tasks-sync.sh).
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: sync tasks view
+        env:
+          NXTO_API: ${{ secrets.NXTO_API }}
+          NXTO_KEY: ${{ secrets.NXTO_KEY }}
+        run: node .github/tasks-sync.mjs
+      - name: commit if changed
+        run: |
+          git config user.name "dashboard-sync"
+          git config user.email "sync@spatial-port.com"
+          git add 50-tasks/tasks.md
+          git diff --cached --quiet || { git commit -m "sync: tasks view from NXTO"; git push; }
