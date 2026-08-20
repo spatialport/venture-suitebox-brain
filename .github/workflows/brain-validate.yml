@@ -1,0 +1,39 @@
+name: brain-validate
+# CI gate per i brain repo (internal-setup.md §6). Installato da tools/install-brain-ci.sh.
+# - Su push e PR: valida forma, tenant, vocabolari, segreti, evidence, supersession.
+# - Su PR con branch evidence/*: auto-merge se la validazione passa (§8.6, firmato 2026-08-20).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: brain-validate
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+        run: node .github/brain-validate.mjs
+
+  automerge-evidence:
+    # Evidence e' proposta e non-autoritativa per definizione: se la forma e' valida, entra.
+    needs: validate
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'evidence/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge ${{ github.event.pull_request.number }} --squash --repo ${{ github.repository }}

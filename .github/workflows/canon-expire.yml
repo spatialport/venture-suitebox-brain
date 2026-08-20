@@ -1,0 +1,28 @@
+name: canon-expire
+# Controllo del debito di review (internal-setup.md §8.6, firmato 2026-08-20):
+# una PR canon/* ferma da 14 giorni si chiude con un commento. Meglio un no
+# esplicito che una coda aperta.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1-5"   # feriali, 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  expire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: close stale canon PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cutoff=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName,updatedAt \
+            --jq ".[] | select(.headRefName | startswith(\"canon/\")) | select(.updatedAt < \"$cutoff\") | .number" |
+          while read -r n; do
+            gh pr close "$n" --repo "$GITHUB_REPOSITORY" \
+              --comment "Chiusa per scadenza (14 giorni senza attivita' — internal-setup.md §8.6). Se la proposta e' ancora valida, riaprila con un branch aggiornato: il canon vecchio di due settimane va riverificato contro l'evidence recente."
+          done
