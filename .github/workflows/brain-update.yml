@@ -1,0 +1,107 @@
+# brain-update — the "trigger job" of the Spatial Port brain system.
+# Every push to main updates EVERYTHING derived from the brain:
+#   1. validate   — brain-validate CI (the backstop of the five hard rules)
+#   2. mirror     — 10-canon/ -> Notion "06 Canon Mirror" (readable from Cowork)
+#   3. deploy     — optional: site/ -> S3 + CloudFront (client dashboards)
+#   4. log        — one row in Notion "04 Sync Log" with the outcome, ALWAYS
+#                   (also on failure: red runs must be visible in the warehouse)
+#
+# Install in every brain repo (and in spatialport-client-template so new
+# clients get it automatically). Uses org-level secrets: NOTION_TOKEN, and —
+# only for repos that deploy — AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY plus
+# repo variables DEPLOY_BUCKET / CLOUDFRONT_DISTRIBUTION_ID.
+
+name: brain-update
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # full re-sync on demand
+
+concurrency:
+  group: brain-update-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Derive brain slug from repo name
+        id: slug
+        run: |
+          REPO="${GITHUB_REPOSITORY#*/}"
+          if [ "$REPO" = "spatialport-agency-brain" ]; then SLUG="agency";
+          else SLUG="$(echo "$REPO" | sed -E 's/^(client|venture)-//; s/-brain$//')"; fi
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+          echo "Brain slug: $SLUG"
+
+      - name: Validate (brain-validate)
+        id: validate
+        run: |
+          if [ -f .github/brain-validate.mjs ]; then
+            node .github/brain-validate.mjs && echo "result=green" >> "$GITHUB_OUTPUT" \
+              || { echo "result=red" >> "$GITHUB_OUTPUT"; exit 1; }
+          else
+            echo "result=missing" >> "$GITHUB_OUTPUT"
+            echo "::warning::.github/brain-validate.mjs not found — validation skipped"
+          fi
+
+      - name: Mirror canon to Notion
+        id: mirror
+        if: always() && steps.validate.outputs.result != 'red'
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          BRAIN_SLUG: ${{ steps.slug.outputs.slug }}
+        run: |
+          node .github/scripts/mirror-canon.mjs && echo "result=ok" >> "$GITHUB_OUTPUT" \
+            || { echo "result=failed" >> "$GITHUB_OUTPUT"; exit 1; }
+
+      - name: Deploy dashboard to S3 (only if configured)
+        id: deploy
+        if: always() && vars.DEPLOY_BUCKET != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'eu-south-1' }}
+        run: |
+          if [ ! -d site ]; then echo "result=no-site-dir" >> "$GITHUB_OUTPUT"; exit 0; fi
+          aws s3 sync site/ "s3://${{ vars.DEPLOY_BUCKET }}" --delete
+          if [ -n "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" ]; then
+            aws cloudfront create-invalidation \
+              --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" --paths "/*"
+          fi
+          echo "result=deployed" >> "$GITHUB_OUTPUT"
+
+      - name: Log outcome to Notion Sync Log (always)
+        if: always()
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: |
+          NOTE="validate=${{ steps.validate.outputs.result || 'n/a' }} mirror=${{ steps.mirror.outputs.result || 'n/a' }} deploy=${{ steps.deploy.outputs.result || 'n/a' }} commit=${GITHUB_SHA:0:7} run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          DASH="__NO__"; [ "${{ steps.deploy.outputs.result }}" = "deployed" ] && DASH="__YES__"
+          cat > /tmp/log.json <<EOF
+          {
+            "parent": {"type": "data_source_id", "data_source_id": "11d31baa-5e30-4db1-b6e0-fd8c86b6d1e1"},
+            "properties": {
+              "Name": {"title": [{"type": "text", "text": {"content": "Brain update ${GITHUB_REPOSITORY#*/}@${GITHUB_SHA:0:7}"}}]},
+              "Run at": {"date": {"start": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}},
+              "Dashboard updated": {"checkbox": $([ "$DASH" = "__YES__" ] && echo true || echo false)},
+              "Notes": {"rich_text": [{"type": "text", "text": {"content": "$NOTE"}}]}
+            }
+          }
+          EOF
+          curl -sf -X POST https://api.notion.com/v1/pages \
+            -H "Authorization: Bearer $NOTION_TOKEN" \
+            -H "Notion-Version: 2025-09-03" \
+            -H "Content-Type: application/json" \
+            --data @/tmp/log.json > /dev/null \
+            || echo "::warning::Sync Log write failed — pipeline state not visible in Notion"
