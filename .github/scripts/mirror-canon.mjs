@@ -63,11 +63,12 @@ function* walk(dir) {
 const frontStatus = txt => (txt.match(/^status:\s*(\w+)/m) || [])[1];
 
 // 1. Local canon files
-if (!existsSync("10-canon")) {
+const CANON_DIR = ["10-canon", "10-company-canon"].find(d => existsSync(d));
+if (!CANON_DIR) {
   console.log("No 10-canon/ directory — nothing to mirror.");
   process.exit(0);
 }
-const files = [...walk("10-canon")];
+const files = [...walk(CANON_DIR)];
 console.log(`Mirroring ${files.length} canon file(s) for slug "${SLUG}"`);
 
 // 2. Existing mirror rows for this slug
